@@ -80,15 +80,17 @@ static void timer_disarm(struct arch_timer_cpu *timer)
 
 static irqreturn_t kvm_arch_timer_handler(int irq, void *dev_id)
 {
-	struct kvm_vcpu *vcpu = *(struct kvm_vcpu **)dev_id;
 
 	/*
+	struct kvm_vcpu *vcpu = *(struct kvm_vcpu **)dev_id;
+
 	 * We disable the timer in the world switch and let it be
 	 * handled by kvm_timer_sync_hwstate(). Getting a timer
 	 * interrupt at this point is a sure sign of some major
 	 * breakage.
-	 */
 	pr_warn("Unexpected interrupt %d on vcpu %p\n", irq, vcpu);
+
+	 */
 	return IRQ_HANDLED;
 }
 
@@ -685,10 +687,13 @@ int kvm_timer_enable(struct kvm_vcpu *vcpu)
 	/*
 	 * Tell the VGIC that the virtual interrupt is tied to a
 	 * physical interrupt. We do that once per VCPU.
+	 * HiSilicon quirk: virtual timer irq map not supported.
 	 */
-	ret = kvm_vgic_map_phys_irq(vcpu, vtimer->irq.irq, phys_irq);
-	if (ret)
-		return ret;
+	if (!needs_hisi_vtimer_quirk()) {
+		ret = kvm_vgic_map_phys_irq(vcpu, vtimer->irq.irq, phys_irq);
+		if (ret)
+			return ret;
+	}
 
 no_vgic:
 	timer->enabled = 1;
