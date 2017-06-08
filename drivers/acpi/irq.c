@@ -200,8 +200,6 @@ static acpi_status acpi_irq_parse_one_cb(struct acpi_resource *ares,
 		return AE_CTRL_TERMINATE;
 	case ACPI_RESOURCE_TYPE_EXTENDED_IRQ:
 		eirq = &ares->data.extended_irq;
-		if (eirq->producer_consumer == ACPI_PRODUCER)
-			return AE_OK;
 		if (ctx->index >= eirq->interrupt_count) {
 			ctx->index -= eirq->interrupt_count;
 			return AE_OK;
