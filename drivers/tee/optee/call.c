@@ -21,16 +21,24 @@
 #include <linux/uaccess.h>
 #include "optee_private.h"
 #include "optee_smc.h"
+#include "optee_bench.h"
 
 struct optee_call_waiter {
 	struct list_head list_node;
 	struct completion c;
-	bool completed;
 };
 
 static void optee_cq_wait_init(struct optee_call_queue *cq,
 			       struct optee_call_waiter *w)
 {
+	/*
+	 * We're preparing to make a call to secure world. In case we can't
+	 * allocate a thread in secure world we'll end up waiting in
+	 * optee_cq_wait_for_completion().
+	 *
+	 * Normally if there's no contention in secure world the call will
+	 * complete and we can cleanup directly with optee_cq_wait_final().
+	 */
 	mutex_lock(&cq->mutex);
 
 	/*
@@ -39,7 +47,6 @@ static void optee_cq_wait_init(struct optee_call_queue *cq,
 	 * returns busy and another thread just exited and try to complete
 	 * someone.
 	 */
-	w->completed = false;
 	init_completion(&w->c);
 	list_add_tail(&w->list_node, &cq->waiters);
 
@@ -55,7 +62,6 @@ static void optee_cq_wait_for_completion(struct optee_call_queue *cq,
 
 	/* Move to end of list to get out of the way for other waiters */
 	list_del(&w->list_node);
-	w->completed = false;
 	reinit_completion(&w->c);
 	list_add_tail(&w->list_node, &cq->waiters);
 
@@ -67,9 +73,8 @@ static void optee_cq_complete_one(struct optee_call_queue *cq)
 	struct optee_call_waiter *w;
 
 	list_for_each_entry(w, &cq->waiters, list_node) {
-		if (!w->completed) {
+		if (!completion_done(&w->c)) {
 			complete(&w->c);
-			w->completed = true;
 			break;
 		}
 	}
@@ -78,17 +83,26 @@ static void optee_cq_complete_one(struct optee_call_queue *cq)
 static void optee_cq_wait_final(struct optee_call_queue *cq,
 				struct optee_call_waiter *w)
 {
+	/*
+	 * We're done with the call to secure world. The thread in secure
+	 * world that was used for this call is now available for some
+	 * other task to use.
+	 */
 	mutex_lock(&cq->mutex);
 
 	/* Get out of the list */
 	list_del(&w->list_node);
 
+	/* Wake up one eventual waiting task */
 	optee_cq_complete_one(cq);
+
 	/*
-	 * If we're completed we've got a completion that some other task
-	 * could have used instead.
+	 * If we're completed we've got a completion from another task that
+	 * was just done with its call to secure world. Since yet another
+	 * thread now is available in secure world wake up another eventual
+	 * waiting task.
 	 */
-	if (w->completed)
+	if (completion_done(&w->c))
 		optee_cq_complete_one(cq);
 
 	mutex_unlock(&cq->mutex);
@@ -131,9 +145,13 @@ u32 optee_do_call_with_arg(struct tee_context *ctx, phys_addr_t parg)
 	while (true) {
 		struct arm_smccc_res res;
 
+		optee_bm_timestamp();
+
 		optee->invoke_fn(param.a0, param.a1, param.a2, param.a3,
 				 param.a4, param.a5, param.a6, param.a7,
 				 &res);
+
+		optee_bm_timestamp();
 
 		if (res.a0 == OPTEE_SMC_RETURN_ETHREAD_LIMIT) {
 			/*
@@ -206,7 +224,6 @@ int optee_open_session(struct tee_context *ctx,
 	struct tee_shm *shm;
 	struct optee_msg_arg *msg_arg;
 	phys_addr_t msg_parg;
-	struct optee_msg_param *msg_param;
 	struct optee_session *sess = NULL;
 
 	/* +2 for the meta parameters added below */
@@ -216,21 +233,20 @@ int optee_open_session(struct tee_context *ctx,
 
 	msg_arg->cmd = OPTEE_MSG_CMD_OPEN_SESSION;
 	msg_arg->cancel_id = arg->cancel_id;
-	msg_param = OPTEE_MSG_GET_PARAMS(msg_arg);
 
 	/*
 	 * Initialize and add the meta parameters needed when opening a
 	 * session.
 	 */
-	msg_param[0].attr = OPTEE_MSG_ATTR_TYPE_VALUE_INPUT |
-			    OPTEE_MSG_ATTR_META;
-	msg_param[1].attr = OPTEE_MSG_ATTR_TYPE_VALUE_INPUT |
-			    OPTEE_MSG_ATTR_META;
-	memcpy(&msg_param[0].u.value, arg->uuid, sizeof(arg->uuid));
-	memcpy(&msg_param[1].u.value, arg->uuid, sizeof(arg->clnt_uuid));
-	msg_param[1].u.value.c = arg->clnt_login;
+	msg_arg->params[0].attr = OPTEE_MSG_ATTR_TYPE_VALUE_INPUT |
+				  OPTEE_MSG_ATTR_META;
+	msg_arg->params[1].attr = OPTEE_MSG_ATTR_TYPE_VALUE_INPUT |
+				  OPTEE_MSG_ATTR_META;
+	memcpy(&msg_arg->params[0].u.value, arg->uuid, sizeof(arg->uuid));
+	memcpy(&msg_arg->params[1].u.value, arg->uuid, sizeof(arg->clnt_uuid));
+	msg_arg->params[1].u.value.c = arg->clnt_login;
 
-	rc = optee_to_msg_param(msg_param + 2, arg->num_params, param);
+	rc = optee_to_msg_param(msg_arg->params + 2, arg->num_params, param);
 	if (rc)
 		goto out;
 
@@ -255,7 +271,7 @@ int optee_open_session(struct tee_context *ctx,
 		kfree(sess);
 	}
 
-	if (optee_from_msg_param(param, arg->num_params, msg_param + 2)) {
+	if (optee_from_msg_param(param, arg->num_params, msg_arg->params + 2)) {
 		arg->ret = TEEC_ERROR_COMMUNICATION;
 		arg->ret_origin = TEEC_ORIGIN_COMMS;
 		/* Close session again to avoid leakage */
@@ -308,7 +324,6 @@ int optee_invoke_func(struct tee_context *ctx, struct tee_ioctl_invoke_arg *arg,
 	struct tee_shm *shm;
 	struct optee_msg_arg *msg_arg;
 	phys_addr_t msg_parg;
-	struct optee_msg_param *msg_param;
 	struct optee_session *sess;
 	int rc;
 
@@ -326,9 +341,8 @@ int optee_invoke_func(struct tee_context *ctx, struct tee_ioctl_invoke_arg *arg,
 	msg_arg->func = arg->func;
 	msg_arg->session = arg->session;
 	msg_arg->cancel_id = arg->cancel_id;
-	msg_param = OPTEE_MSG_GET_PARAMS(msg_arg);
 
-	rc = optee_to_msg_param(msg_param, arg->num_params, param);
+	rc = optee_to_msg_param(msg_arg->params, arg->num_params, param);
 	if (rc)
 		goto out;
 
@@ -337,7 +351,7 @@ int optee_invoke_func(struct tee_context *ctx, struct tee_ioctl_invoke_arg *arg,
 		msg_arg->ret_origin = TEEC_ORIGIN_COMMS;
 	}
 
-	if (optee_from_msg_param(param, arg->num_params, msg_param)) {
+	if (optee_from_msg_param(param, arg->num_params, msg_arg->params)) {
 		msg_arg->ret = TEEC_ERROR_COMMUNICATION;
 		msg_arg->ret_origin = TEEC_ORIGIN_COMMS;
 	}
@@ -401,7 +415,7 @@ void optee_enable_shm_cache(struct optee *optee)
 }
 
 /**
- * optee_enable_shm_cache() - Disables caching of some shared memory allocation
+ * optee_disable_shm_cache() - Disables caching of some shared memory allocation
  *			      in OP-TEE
  * @optee:	main service struct
  */

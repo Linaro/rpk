@@ -53,61 +53,47 @@ struct optee_wait_queue {
  * @ctx			the context of current connected supplicant.
  *			if !NULL the supplicant device is available for use,
  *			else busy
- * @ctx_mutex:		held while accessing @ctx
- * @func:		supplicant function id to call
- * @ret:		call return value
- * @num_params:		number of elements in @param
- * @param:		parameters for @func
- * @req_posted:		if true, a request has been posted to the supplicant
- * @supp_next_send:	if true, next step is for supplicant to send response
- * @thrd_mutex:		held by the thread doing a request to supplicant
- * @supp_mutex:		held by supplicant while operating on this struct
- * @data_to_supp:	supplicant is waiting on this for next request
- * @data_from_supp:	requesting thread is waiting on this to get the result
+ * @mutex:		held while accessing content of this struct
+ * @req_id:		current request id if supplicant is doing synchronous
+ *			communication, else -1
+ * @reqs:		queued request not yet retrieved by supplicant
+ * @idr:		IDR holding all requests currently being processed
+ *			by supplicant
+ * @reqs_c:		completion used by supplicant when waiting for a
+ *			request to be queued.
  */
 struct optee_supp {
+	/* Serializes access to this struct */
+	struct mutex mutex;
 	struct tee_context *ctx;
-	/* Serializes access of ctx */
-	struct mutex ctx_mutex;
 
-	u32 func;
-	u32 ret;
-	size_t num_params;
-	struct tee_param *param;
-
-	bool req_posted;
-	bool supp_next_send;
-	/* Serializes access to this struct for requesting thread */
-	struct mutex thrd_mutex;
-	/* Serializes access to this struct for supplicant threads */
-	struct mutex supp_mutex;
-	struct completion data_to_supp;
-	struct completion data_from_supp;
+	int req_id;
+	struct list_head reqs;
+	struct idr idr;
+	struct completion reqs_c;
 };
 
 /**
  * struct optee - main service struct
  * @supp_teedev:	supplicant device
  * @teedev:		client device
- * @dev:		probed device
  * @invoke_fn:		function to issue smc or hvc
  * @call_queue:		queue of threads waiting to call @invoke_fn
  * @wait_queue:		queue of threads from secure world waiting for a
  *			secure world sync object
  * @supp:		supplicant synchronization struct for RPC to supplicant
  * @pool:		shared memory pool
- * @ioremaped_shm	virtual address of memory in shared memory pool
+ * @memremaped_shm	virtual address of memory in shared memory pool
  */
 struct optee {
 	struct tee_device *supp_teedev;
 	struct tee_device *teedev;
-	struct device *dev;
 	optee_invoke_fn *invoke_fn;
 	struct optee_call_queue call_queue;
 	struct optee_wait_queue wait_queue;
 	struct optee_supp supp;
 	struct tee_shm_pool *pool;
-	void __iomem *ioremaped_shm;
+	void *memremaped_shm;
 };
 
 struct optee_session {
@@ -144,6 +130,7 @@ int optee_supp_read(struct tee_context *ctx, void __user *buf, size_t len);
 int optee_supp_write(struct tee_context *ctx, void __user *buf, size_t len);
 void optee_supp_init(struct optee_supp *supp);
 void optee_supp_uninit(struct optee_supp *supp);
+void optee_supp_release(struct optee_supp *supp);
 
 int optee_supp_recv(struct tee_context *ctx, u32 *func, u32 *num_params,
 		    struct tee_param *param);
