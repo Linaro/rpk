@@ -1,0 +1,29 @@
+#
+# Socionext Network device configuration
+#
+
+config NET_VENDOR_SNI
+	bool "Socionext devices"
+	default y
+	---help---
+	  If you have a network (Ethernet) card belonging to this class, say Y.
+
+	  Note that the answer to this question doesn't directly affect the
+	  the questions about Socionext cards. If you say Y, you will be asked
+	  for your specific card in the following questions.
+
+if NET_VENDOR_SNI
+
+config SNI_NETSEC
+	tristate "NETSEC Driver Support"
+	depends on OF
+	select PHYLIB
+	select MII
+help
+	  Enable to add support for the SocioNext NetSec Gigabit Ethernet
+	  controller + PHY, as found on the Synquacer SC2A11 SoC
+
+	  To compile this driver as a module, choose M here: the module will be
+	  called netsec.  If unsure, say N.
+
+endif # NET_VENDOR_SNI
