@@ -1429,6 +1429,38 @@ static int netsec_netdev_set_features(struct net_device *ndev,
 	return 0;
 }
 
+static int netsec_netdev_ioctl(struct net_device *ndev, struct ifreq *ifr,
+			       int cmd)
+{
+	struct netsec_priv *priv = netdev_priv(ndev);
+	struct mii_ioctl_data *data = if_mii(ifr);
+	int phy_addr = ndev->phydev->mdio.addr;
+
+	if (!netif_running(ndev))
+	       return -ENODEV;
+
+	switch (cmd) {
+		int ret;
+
+	case SIOCGMIIPHY:
+		data->phy_id = phy_addr;
+		/* fall through */
+
+	case SIOCGMIIREG:
+		ret = mdiobus_read(priv->mii_bus, phy_addr,
+				   data->reg_num & 0x1f);
+		if (ret < 0)
+			return ret;
+		data->val_out = ret;
+		return 0;
+
+	case SIOCSMIIREG:
+		return mdiobus_write(priv->mii_bus, phy_addr,
+				     data->reg_num & 0x1f, data->val_in);
+	}
+	return -EOPNOTSUPP;
+}
+
 static const struct net_device_ops netsec_netdev_ops = {
 	.ndo_init		= netsec_netdev_init,
 	.ndo_uninit		= netsec_netdev_uninit,
@@ -1438,6 +1470,7 @@ static const struct net_device_ops netsec_netdev_ops = {
 	.ndo_set_features	= netsec_netdev_set_features,
 	.ndo_set_mac_address    = eth_mac_addr,
 	.ndo_validate_addr	= eth_validate_addr,
+	.ndo_do_ioctl		= netsec_netdev_ioctl,
 };
 
 /*************************************************************/
