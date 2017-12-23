@@ -2,7 +2,7 @@
 # Socionext Network device configuration
 #
 
-config NET_VENDOR_SNI
+config NET_VENDOR_SOCIONEXT
 	bool "Socionext devices"
 	default y
 	---help---
@@ -12,11 +12,11 @@ config NET_VENDOR_SNI
 	  the questions about Socionext cards. If you say Y, you will be asked
 	  for your specific card in the following questions.
 
-if NET_VENDOR_SNI
+if NET_VENDOR_SOCIONEXT
 
 config SNI_NETSEC
 	tristate "NETSEC Driver Support"
-	depends on OF
+	depends on (ARCH_SYNQUACER || COMPILE_TEST) && OF
 	select PHYLIB
 	select MII
 help
@@ -26,4 +26,4 @@ help
 	  To compile this driver as a module, choose M here: the module will be
 	  called netsec.  If unsure, say N.
 
-endif # NET_VENDOR_SNI
+endif # NET_VENDOR_SOCIONEXT

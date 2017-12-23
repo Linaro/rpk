@@ -1,9 +1,4 @@
-/**
- *  This program is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU General Public License
- *  as published by the Free Software Foundation; either version 2
- *  of the License, or (at your option) any later version.
- */
+// SPDX-License-Identifier: GPL-2.0
 
 #include <linux/types.h>
 #include <linux/clk.h>
@@ -274,15 +269,13 @@ struct netsec_priv {
 	struct phy_device *phydev;
 	struct mii_bus *mii_bus;
 	void __iomem *ioaddr;
-	const void *eeprom_base;
+	void __iomem *eeprom_base;
 	struct device *dev;
 	struct clk *clk[3];
 	u32 msg_enable;
 	u32 freq;
-	int actual_link_speed;
 	int clock_count;
 	bool rx_cksum_offload_flag;
-	bool actual_duplex;
 };
 
 struct netsec_de { /* Netsec Descriptor layout */
@@ -465,14 +458,11 @@ static int netsec_mac_update_to_phy_state(struct netsec_priv *priv)
 
 	value |= NETSEC_GMAC_MCR_REG_CST | NETSEC_GMAC_MCR_REG_JE;
 
-	if (priv->phy_interface == PHY_INTERFACE_MODE_RGMII)
+	if (phy_interface_mode_is_rgmii(priv->phy_interface))
 		value |= NETSEC_GMAC_MCR_REG_IBN;
 
 	if (netsec_mac_write(priv, GMAC_REG_MCR, value))
 		return -ETIMEDOUT;
-
-	priv->actual_link_speed = phydev->speed;
-	priv->actual_duplex = phydev->duplex;
 
 	return 0;
 }
@@ -959,7 +949,6 @@ static void netsec_uninit_pkt_dring(struct netsec_priv *priv, int id)
 {
 	struct netsec_desc_ring *dring = &priv->desc_ring[id];
 	struct netsec_desc *desc;
-	u32 status;
 	u16 idx;
 
 	if (!dring->vaddr || !dring->desc)
@@ -970,17 +959,18 @@ static void netsec_uninit_pkt_dring(struct netsec_priv *priv, int id)
 		if (!desc->addr)
 			continue;
 
-		status = *(u32 *)(dring->vaddr + DESC_SZ * idx);
-
 		dma_unmap_single(priv->dev, desc->dma_addr, desc->len,
 				 id == NETSEC_RING_RX ? DMA_FROM_DEVICE :
 							      DMA_TO_DEVICE);
-		if ((status >> NETSEC_TX_LAST) & 1)
-			dev_kfree_skb(desc->skb);
+		dev_kfree_skb(desc->skb);
 	}
 
 	memset(dring->desc, 0, sizeof(struct netsec_desc) * DESC_NUM);
 	memset(dring->vaddr, 0, DESC_SZ * DESC_NUM);
+
+	dring->head = 0;
+	dring->tail = 0;
+	dring->pkt_cnt = 0;
 }
 
 static void netsec_free_dring(struct netsec_priv *priv, int id)
@@ -1047,45 +1037,46 @@ static int netsec_netdev_load_ucode_region(struct netsec_priv *priv, u32 reg,
 					   u32 addr_h, u32 addr_l, u32 size)
 {
 	u64 base = (u64)addr_h << 32 | addr_l;
-	__le32 *ucode;
+	u32 __iomem *ucode;
 	u32 i;
 
-	ucode = memremap(base, size * sizeof(u32), MEMREMAP_WT);
+	ucode = ioremap(base, size * sizeof(u32));
 	if (!ucode)
 		return -ENOMEM;
 
 	for (i = 0; i < size; i++)
-		netsec_write(priv, reg, le32_to_cpu(ucode[i]));
+		netsec_write(priv, reg, readl(ucode + i));
 
-	memunmap(ucode);
+	iounmap(ucode);
 	return 0;
 }
 
 static int netsec_netdev_load_microcode(struct netsec_priv *priv)
 {
+	u32 addr_h, addr_l, size;
 	int err;
 
-	err = netsec_netdev_load_ucode_region(
-		priv, NETSEC_REG_DMAC_HM_CMD_BUF,
-		le32_to_cpup(priv->eeprom_base + NETSEC_EEPROM_HM_ME_ADDRESS_H),
-		le32_to_cpup(priv->eeprom_base + NETSEC_EEPROM_HM_ME_ADDRESS_L),
-		le32_to_cpup(priv->eeprom_base + NETSEC_EEPROM_HM_ME_SIZE));
+	addr_h = readl(priv->eeprom_base + NETSEC_EEPROM_HM_ME_ADDRESS_H);
+	addr_l = readl(priv->eeprom_base + NETSEC_EEPROM_HM_ME_ADDRESS_L);
+	size = readl(priv->eeprom_base + NETSEC_EEPROM_HM_ME_SIZE);
+	err = netsec_netdev_load_ucode_region(priv, NETSEC_REG_DMAC_HM_CMD_BUF,
+					      addr_h, addr_l, size);
 	if (err)
 		return err;
 
-	err = netsec_netdev_load_ucode_region(
-		priv, NETSEC_REG_DMAC_MH_CMD_BUF,
-		le32_to_cpup(priv->eeprom_base + NETSEC_EEPROM_MH_ME_ADDRESS_H),
-		le32_to_cpup(priv->eeprom_base + NETSEC_EEPROM_MH_ME_ADDRESS_L),
-		le32_to_cpup(priv->eeprom_base + NETSEC_EEPROM_MH_ME_SIZE));
+	addr_h = readl(priv->eeprom_base + NETSEC_EEPROM_MH_ME_ADDRESS_H);
+	addr_l = readl(priv->eeprom_base + NETSEC_EEPROM_MH_ME_ADDRESS_L);
+	size = readl(priv->eeprom_base + NETSEC_EEPROM_MH_ME_SIZE);
+	err = netsec_netdev_load_ucode_region(priv, NETSEC_REG_DMAC_MH_CMD_BUF,
+					      addr_h, addr_l, size);
 	if (err)
 		return err;
 
-	err = netsec_netdev_load_ucode_region(
-		priv, NETSEC_REG_PKT_CMD_BUF,
-		0,
-		le32_to_cpup(priv->eeprom_base + NETSEC_EEPROM_PKT_ME_ADDRESS),
-		le32_to_cpup(priv->eeprom_base + NETSEC_EEPROM_PKT_ME_SIZE));
+	addr_h = 0;
+	addr_l = readl(priv->eeprom_base + NETSEC_EEPROM_PKT_ME_ADDRESS);
+	size = readl(priv->eeprom_base + NETSEC_EEPROM_PKT_ME_SIZE);
+	err = netsec_netdev_load_ucode_region(priv, NETSEC_REG_PKT_CMD_BUF,
+					      addr_h, addr_l, size);
 	if (err)
 		return err;
 
@@ -1262,9 +1253,6 @@ static int netsec_stop_gmac(struct netsec_priv *priv)
 	netsec_write(priv, NETSEC_REG_NRM_RX_INTEN_CLR, ~0);
 	netsec_write(priv, NETSEC_REG_NRM_TX_INTEN_CLR, ~0);
 
-	priv->actual_link_speed = 0;
-	priv->actual_duplex = false;
-
 	return netsec_mac_write(priv, GMAC_REG_OMR, value);
 }
 
@@ -1368,6 +1356,8 @@ static int netsec_netdev_stop(struct net_device *ndev)
 	struct netsec_priv *priv = netdev_priv(ndev);
 
 	netif_stop_queue(priv->ndev);
+	dma_wmb();
+
 	napi_disable(&priv->napi);
 
 	netsec_write(priv, NETSEC_REG_INTEN_CLR, ~0);
@@ -1432,33 +1422,7 @@ static int netsec_netdev_set_features(struct net_device *ndev,
 static int netsec_netdev_ioctl(struct net_device *ndev, struct ifreq *ifr,
 			       int cmd)
 {
-	struct netsec_priv *priv = netdev_priv(ndev);
-	struct mii_ioctl_data *data = if_mii(ifr);
-	int phy_addr = ndev->phydev->mdio.addr;
-
-	if (!netif_running(ndev))
-	       return -ENODEV;
-
-	switch (cmd) {
-		int ret;
-
-	case SIOCGMIIPHY:
-		data->phy_id = phy_addr;
-		/* fall through */
-
-	case SIOCGMIIREG:
-		ret = mdiobus_read(priv->mii_bus, phy_addr,
-				   data->reg_num & 0x1f);
-		if (ret < 0)
-			return ret;
-		data->val_out = ret;
-		return 0;
-
-	case SIOCSMIIREG:
-		return mdiobus_write(priv->mii_bus, phy_addr,
-				     data->reg_num & 0x1f, data->val_in);
-	}
-	return -EOPNOTSUPP;
+	return phy_mii_ioctl(ndev->phydev, ifr, cmd);
 }
 
 static const struct net_device_ops netsec_netdev_ops = {
@@ -1583,7 +1547,21 @@ static int netsec_register_mdio(struct netsec_priv *priv, u32 phy_addr)
 	priv->mii_bus = bus;
 
 	if (dev_of_node(priv->dev)) {
-		ret = of_mdiobus_register(bus, dev_of_node(priv->dev));
+		struct device_node *mdio_node, *parent = dev_of_node(priv->dev);
+
+		mdio_node = of_get_child_by_name(parent, "mdio");
+		if (mdio_node) {
+			parent = mdio_node;
+		} else {
+			/* older f/w doesn't populate the mdio subnode,
+			 * allow relaxed upgrade of f/w in due time.
+			 */
+			dev_err(priv->dev, "Upgrade f/w for mdio subnode!\n");
+		}
+
+		ret = of_mdiobus_register(bus, parent);
+		of_node_put(mdio_node);
+
 		if (ret) {
 			dev_err(priv->dev, "mdiobus register err(%d)\n", ret);
 			return ret;
@@ -1597,7 +1575,7 @@ static int netsec_register_mdio(struct netsec_priv *priv, u32 phy_addr)
 			return ret;
 		}
 
-		priv->phydev = get_phy_device(priv->mii_bus, phy_addr, false);
+		priv->phydev = get_phy_device(bus, phy_addr, false);
 		if (IS_ERR(priv->phydev)) {
 			ret = PTR_ERR(priv->phydev);
 			dev_err(priv->dev, "get_phy_device err(%d)\n", ret);
@@ -1606,9 +1584,11 @@ static int netsec_register_mdio(struct netsec_priv *priv, u32 phy_addr)
 		}
 
 		ret = phy_device_register(priv->phydev);
-		if (ret)
+		if (ret) {
+			mdiobus_unregister(bus);
 			dev_err(priv->dev,
 				"phy_device_register err(%d)\n", ret);
+		}
 	}
 
 	return ret;
@@ -1620,7 +1600,7 @@ static int netsec_probe(struct platform_device *pdev)
 	u8 *mac, macbuf[ETH_ALEN];
 	struct netsec_priv *priv;
 	struct net_device *ndev;
-	u32 hw_ver, phy_addr;
+	u32 hw_ver, phy_addr = 0;
 	int ret;
 
 	mmio_res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
@@ -1672,11 +1652,10 @@ static int netsec_probe(struct platform_device *pdev)
 		goto free_ndev;
 	}
 
-	priv->eeprom_base = devm_memremap(&pdev->dev, eeprom_res->start,
-					  resource_size(eeprom_res),
-					  MEMREMAP_WT);
+	priv->eeprom_base = devm_ioremap(&pdev->dev, eeprom_res->start,
+					 resource_size(eeprom_res));
 	if (!priv->eeprom_base) {
-		dev_err(&pdev->dev, "devm_memremap() failed for EEPROM\n");
+		dev_err(&pdev->dev, "devm_ioremap() failed for EEPROM\n");
 		ret = -ENXIO;
 		goto free_ndev;
 	}
@@ -1687,14 +1666,15 @@ static int netsec_probe(struct platform_device *pdev)
 
 	if (priv->eeprom_base &&
 	    (!mac || !is_valid_ether_addr(ndev->dev_addr))) {
-		const u8 *macp = priv->eeprom_base + NETSEC_EEPROM_MAC_ADDRESS;
+		void __iomem *macp = priv->eeprom_base +
+					NETSEC_EEPROM_MAC_ADDRESS;
 
-		ndev->dev_addr[0] = macp[3];
-		ndev->dev_addr[1] = macp[2];
-		ndev->dev_addr[2] = macp[1];
-		ndev->dev_addr[3] = macp[0];
-		ndev->dev_addr[4] = macp[7];
-		ndev->dev_addr[5] = macp[6];
+		ndev->dev_addr[0] = readb(macp + 3);
+		ndev->dev_addr[1] = readb(macp + 2);
+		ndev->dev_addr[2] = readb(macp + 1);
+		ndev->dev_addr[3] = readb(macp + 0);
+		ndev->dev_addr[4] = readb(macp + 7);
+		ndev->dev_addr[5] = readb(macp + 6);
 	}
 
 	if (!is_valid_ether_addr(ndev->dev_addr)) {
@@ -1754,7 +1734,7 @@ static int netsec_probe(struct platform_device *pdev)
 
 	ret = netsec_register_mdio(priv, phy_addr);
 	if (ret)
-		goto unreg_mii;
+		goto unreg_napi;
 
 	if (dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64)))
 		dev_warn(&pdev->dev, "Failed to enable 64-bit DMA\n");
@@ -1770,14 +1750,13 @@ static int netsec_probe(struct platform_device *pdev)
 
 unreg_mii:
 	netsec_unregister_mdio(priv);
-
+unreg_napi:
+	netif_napi_del(&priv->napi);
 pm_disable:
 	pm_runtime_put_sync(&pdev->dev);
 	pm_runtime_disable(&pdev->dev);
-
 free_ndev:
 	free_netdev(ndev);
-
 	dev_err(&pdev->dev, "init failed\n");
 
 	return ret;
