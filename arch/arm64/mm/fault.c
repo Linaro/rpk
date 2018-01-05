@@ -330,6 +330,7 @@ static void __do_user_fault(struct task_struct *tsk, unsigned long addr,
 		lsb = PAGE_SHIFT;
 	si.si_addr_lsb = lsb;
 
+	arm64_apply_bp_hardening();
 	force_sig_info(sig, &si, tsk);
 }
 
