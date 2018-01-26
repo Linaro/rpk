@@ -3355,3 +3355,42 @@ int __init its_init(struct fwnode_handle *handle, struct rdists *rdists,
 
 	return 0;
 }
+
+#if defined(CONFIG_SOCIONEXT_SYNQUACER_PREITS) && defined(CONFIG_ACPI)
+static acpi_status __init acpi_its_device_probe (acpi_handle handle,
+						 u32 depth, void *context,
+						 void **ret)
+{
+	struct acpi_device *adev;
+	unsigned long long phys_base;
+	struct its_node *its;
+	acpi_status status;
+	int err;
+
+	err = acpi_bus_get_device(handle, &adev);
+	if (err)
+		return AE_CTRL_TERMINATE;
+
+	status = acpi_evaluate_integer(handle, "_ADR", NULL, &phys_base);
+	if (ACPI_FAILURE(status))
+		return status;
+
+	list_for_each_entry(its, &its_nodes, entry)
+		if (its->phys_base == phys_base) {
+			irq_domain_free_fwnode(its->fwnode_handle);
+			its->fwnode_handle = &adev->fwnode;
+			its_enable_quirk_socionext_synquacer(its);
+			break;
+		}
+
+	return AE_CTRL_TERMINATE;
+}
+
+static int __init acpi_its_device_probe_init(void)
+{
+	if (!acpi_disabled)
+		acpi_get_devices("SCX0005", acpi_its_device_probe, NULL, NULL);
+	return 0;
+}
+subsys_initcall_sync(acpi_its_device_probe_init);
+#endif
