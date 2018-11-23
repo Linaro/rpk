@@ -27,6 +27,9 @@ static bool group1_trap;
 static bool common_trap;
 static bool gicv4_enable;
 
+DEFINE_STATIC_KEY_FALSE(hisi_vtimer_quirk_enabled);
+EXPORT_SYMBOL_GPL(hisi_vtimer_quirk_enabled);
+
 void vgic_v3_set_underflow(struct kvm_vcpu *vcpu)
 {
 	struct vgic_v3_cpu_if *cpuif = &vcpu->arch.vgic_cpu.vgic_v3;
@@ -46,6 +49,7 @@ void vgic_v3_fold_lr_state(struct kvm_vcpu *vcpu)
 	struct vgic_v3_cpu_if *cpuif = &vgic_cpu->vgic_v3;
 	u32 model = vcpu->kvm->arch.vgic.vgic_model;
 	int lr;
+	struct arch_timer_context *vtimer = vcpu_vtimer(vcpu);
 
 	DEBUG_SPINLOCK_BUG_ON(!irqs_disabled());
 
@@ -71,6 +75,11 @@ void vgic_v3_fold_lr_state(struct kvm_vcpu *vcpu)
 		if (lr_signals_eoi_mi(val) && vgic_valid_spi(vcpu->kvm, intid))
 			kvm_notify_acked_irq(vcpu->kvm, 0,
 					     intid - VGIC_NR_PRIVATE_IRQS);
+
+		if (intid == vtimer->irq.irq && needs_hisi_vtimer_quirk()
+		    && lr_signals_eoi_mi(val)) {
+			kvm_vtimer_irq_eoi(vcpu);
+		}
 
 		irq = vgic_get_irq(vcpu->kvm, vcpu, intid);
 		if (!irq)	/* An LPI could have been unmapped. */
@@ -132,6 +141,7 @@ void vgic_v3_populate_lr(struct kvm_vcpu *vcpu, struct vgic_irq *irq, int lr)
 	u32 model = vcpu->kvm->arch.vgic.vgic_model;
 	u64 val = irq->intid;
 	bool allow_pending = true, is_v2_sgi;
+	struct arch_timer_context *vtimer = vcpu_vtimer(vcpu);
 
 	is_v2_sgi = (vgic_irq_is_sgi(irq->intid) &&
 		     model == KVM_DEV_TYPE_ARM_VGIC_V2);
@@ -197,6 +207,16 @@ void vgic_v3_populate_lr(struct kvm_vcpu *vcpu, struct vgic_irq *irq, int lr)
 	 */
 	if (vgic_irq_is_mapped_level(irq) && (val & ICH_LR_PENDING_BIT))
 		irq->line_level = false;
+
+	/*
+	 * we should make sure that the vtimer does not queue lr with
+	 * pending & active status
+	 * */
+	if (irq->intid == vtimer->irq.irq && needs_hisi_vtimer_quirk()) {
+		if (irq->active && irq_is_pending(irq)) {
+			val &= ~ICH_LR_PENDING_BIT;
+		}
+	}
 
 	if (irq->group)
 		val |= ICH_LR_GROUP;
@@ -605,6 +625,12 @@ int vgic_v3_probe(const struct gic_kvm_info *info)
 		kvm_vgic_global_state.has_gicv4 = gicv4_enable;
 		kvm_info("GICv4 support %sabled\n",
 			 gicv4_enable ? "en" : "dis");
+	}
+
+	/* HiSilicon Quirk: virt timer irqmap not supported */
+	if (info->hisi_vtimer_quirk) {
+		static_branch_enable(&hisi_vtimer_quirk_enabled);
+		kvm_info("Enabling HiSilicon GIC virt timer quirk\n");
 	}
 
 	if (!info->vcpu.start) {
